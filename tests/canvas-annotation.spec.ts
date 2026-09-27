@@ -122,6 +122,35 @@ describe('canvas annotation bindings', () => {
     expect(updateShapes).not.toHaveBeenCalled()
   })
 
+  it.each(['point', 'arrow', 'region'] as const)('sends %s dimensions only in props', kind => {
+    const image = { id: 'shape:image-validator', type: 'image', props: { w: 100, h: 100 } }
+    const annotation = {
+      id: `shape:${kind}-validator`, type: 'geo', x: 0, y: 0, rotation: 0,
+      meta: { targetShapeId: image.id, canvasEditAnnotation: {
+        kind, x: 0.5, y: 0.5, ...(kind === 'region' ? { width: 0.2, height: 0.3 } : {}), ...(kind === 'arrow' ? { angle: 0 } : {}),
+      } },
+      props: { w: 12, h: 12 },
+    }
+    let updates: readonly Record<string, unknown>[] = []
+    const editor = {
+      getCurrentPageShapes: () => [image, annotation],
+      getShapePageTransform: () => ({ a: 1, b: 0, c: 0, d: 1, e: 1, f: 1 }),
+      updateShapes: (shapes: readonly Record<string, unknown>[]) => {
+        for (const shape of shapes) {
+          if ('w' in shape || 'h' in shape) throw new Error('At shape(type = geo).w: Unexpected property')
+        }
+        updates = shapes
+      },
+      run: (operation: () => void) => operation(),
+    } as unknown as Editor
+
+    expect(() => syncLinkedAnnotationPositions(editor, new Set([image.id]))).not.toThrow()
+    expect(updates).toHaveLength(1)
+    expect(updates[0]).not.toHaveProperty('w')
+    expect(updates[0]).not.toHaveProperty('h')
+    if (kind === 'region') expect(updates[0]).toMatchObject({ props: { w: 20, h: 30 } })
+  })
+
   it('updates only annotations linked to changed images', () => {
     const imageA = { id: 'shape:image-a', type: 'image', props: { w: 100, h: 100 } }
     const imageB = { id: 'shape:image-b', type: 'image', props: { w: 100, h: 100 } }

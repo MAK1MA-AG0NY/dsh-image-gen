@@ -95,7 +95,14 @@ export function syncLinkedAnnotationPositions(editor: Editor, changedImageIds: R
     const heightChanged = isRegion && Math.abs(shape.props.h - height) > 0.01
     if (Math.abs(shape.x - placement.x) <= 0.01 && Math.abs(shape.y - placement.y) <= 0.01
       && Math.abs(shape.rotation - placement.rotation) <= 0.0001 && !widthChanged && !heightChanged) return []
-    return [{ id: shape.id, type: 'geo' as const, ...placement, ...(isRegion ? { props: { w: width, h: height } } : {}) }]
+    return [{
+      id: shape.id,
+      type: 'geo' as const,
+      x: placement.x,
+      y: placement.y,
+      rotation: placement.rotation,
+      ...(isRegion ? { props: { w: width, h: height } } : {}),
+    }]
   })
   if (updates.length > 0) editor.run(() => editor.updateShapes(updates), { ignoreShapeLock: true, history: 'ignore' })
 }
