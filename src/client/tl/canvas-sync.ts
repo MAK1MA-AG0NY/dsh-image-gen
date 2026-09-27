@@ -14,101 +14,15 @@
  * change retries. Duplicate snapshots (e.g. camera pans that change nothing
  * in the summary) never hit the network.
  */
-import type { Editor, TLShape } from 'tldraw'
-import { CANVAS_MAX_NODES, CANVAS_MAX_PROMPT_CHARS, CANVAS_MAX_SELECTION_ITEMS, CANVAS_MAX_SELECTION_KINDS, CANVAS_STATE_ROUTE, type CanvasNodeKind, type CanvasNodeSummary, type CanvasStatePush } from '../../shared.js'
+import type { Editor } from 'tldraw'
+import { CANVAS_MAX_NODES, CANVAS_MAX_SELECTION_ITEMS, CANVAS_MAX_SELECTION_KINDS, CANVAS_STATE_ROUTE, type CanvasNodeKind, type CanvasNodeSummary, type CanvasStatePush } from '../../shared.js'
 import { exportSelectionPreview, readCanvasImageLimit, syncCanvasOriginal, type CanvasOriginalCacheEntry } from './canvas-selection.js'
+import { annotationOf, describeShape, kindOf, supportsAnnotationCoordinates } from './canvas-summary.js'
 
 /** Debounce for ordinary document/session changes. */
 const STATE_DEBOUNCE_MS = 600
 /** Extra settle time before an expensive selection screenshot export. */
 const SELECTION_EXPORT_DELAY_MS = 1200
-const MAX_TEXT_CHARS = 96
-
-/** Map a tldraw shape type onto the coarse model-facing node kind. */
-function kindOf(shapeType: string): CanvasNodeKind {
-  switch (shapeType) {
-    case 'image': return 'image'
-    case 'draw':
-    case 'highlight': return 'draw'
-    case 'text': return 'text'
-    case 'note': return 'note'
-    case 'geo': return 'geo'
-    case 'arrow':
-    case 'line': return 'arrow'
-    case 'frame': return 'frame'
-    default: return 'other'
-  }
-}
-
-/** Flatten a ProseMirror-style rich text node into a plain text preview. */
-function richTextPreview(value: unknown): string | undefined {
-  if (typeof value === 'string') return value
-  if (value === null || typeof value !== 'object') return undefined
-  const parts: string[] = []
-  const visit = (node: unknown): void => {
-    if (node === null || typeof node !== 'object') return
-    const record = node as Record<string, unknown>
-    if (typeof record.text === 'string') parts.push(record.text)
-    if (Array.isArray(record.content)) for (const child of record.content) visit(child)
-  }
-  visit(value)
-  return parts.length === 0 ? undefined : parts.join(' ')
-}
-
-function previewOf(text: string | undefined): string | undefined {
-  if (text === undefined) return undefined
-  const collapsed = text.replace(/\s+/g, ' ').trim()
-  return collapsed.length === 0 ? undefined : collapsed.slice(0, MAX_TEXT_CHARS)
-}
-
-/**
- * Summarize one shape for the model. Used both for the page inventory and for
- * the selection identity list, so a selected node reads exactly like its
- * canvas node twin (same name, attachment id, dimensions).
- */
-function describeShape(editor: Editor, shape: TLShape): CanvasNodeSummary {
-  const node: CanvasNodeSummary = { kind: kindOf(shape.type) }
-  if (shape.type === 'image') {
-    const meta = shape.meta as { galleryId?: unknown; attachmentId?: unknown; name?: unknown; prompt?: unknown; provider?: unknown; model?: unknown } | undefined
-    const galleryId = meta?.galleryId
-    if (typeof galleryId === 'string' && galleryId.length > 0) {
-      node.galleryId = galleryId
-    }
-    if (typeof meta?.attachmentId === 'string' && meta.attachmentId.length > 0) node.attachmentId = meta.attachmentId
-    // Generation provenance written at landing time: lets the model reproduce
-    // or precisely vary this image instead of guessing from pixels. Prompt is
-    // truncated at landing; slice again defensively so a stale untruncated
-    // shape (hot reload during dev) cannot bloat the digest.
-    if (typeof meta?.prompt === 'string' && meta.prompt.trim().length > 0) {
-      node.prompt = meta.prompt.replace(/\s+/g, ' ').trim().slice(0, CANVAS_MAX_PROMPT_CHARS)
-    }
-    if (typeof meta?.provider === 'string' && meta.provider.length > 0) node.provider = meta.provider
-    if (typeof meta?.model === 'string' && meta.model.length > 0) node.model = meta.model
-    const asset = shape.props.assetId === null ? undefined : editor.getAsset(shape.props.assetId)
-    const assetName = typeof meta?.name === 'string' && meta.name.length > 0
-      ? meta.name : asset !== undefined && asset.type === 'image' ? asset.props.name : undefined
-    if (typeof assetName === 'string' && assetName.length > 0) node.name = assetName.slice(0, 128)
-    if (asset !== undefined && asset.type === 'image') {
-      node.width = Math.round(asset.props.w)
-      node.height = Math.round(asset.props.h)
-    } else {
-      node.width = Math.round(shape.props.w)
-      node.height = Math.round(shape.props.h)
-    }
-  } else if (shape.type === 'text' || shape.type === 'note') {
-    const preview = previewOf(richTextPreview(shape.props.richText))
-    if (preview !== undefined) node.text = preview
-    // TLTextShapeProps has no `h`: tldraw auto-sizes text height from content.
-    if (shape.type === 'text') node.width = Math.round(shape.props.w)
-  } else if (shape.type === 'geo') {
-    node.name = String(shape.props.geo)
-    const preview = previewOf(richTextPreview(shape.props.richText))
-    if (preview !== undefined) node.text = preview
-    node.width = Math.round(shape.props.w)
-    node.height = Math.round(shape.props.h)
-  }
-  return node
-}
 
 interface CanvasSummary {
   nodeCount: number
@@ -132,7 +46,7 @@ function summarize(editor: Editor): CanvasSummary {
 
   const selected = editor.getSelectedShapes()
   const selectionKinds = [...new Set(selected.map(shape => kindOf(shape.type)))].slice(0, CANVAS_MAX_SELECTION_KINDS)
-  const selectionItems = selected.slice(0, CANVAS_MAX_SELECTION_ITEMS).map(shape => describeShape(editor, shape))
+  const selectionItems = selected.slice(0, CANVAS_MAX_SELECTION_ITEMS).map(shape => describeShape(editor, shape, true))
   const selectionKey = selectionKeyOf(editor)
   return {
     nodeCount: shapes.length,
@@ -265,13 +179,27 @@ export function startCanvasSync(editor: Editor, onStatus: (status: CanvasSyncSta
     const currentRevision = revision
     const signal = AbortSignal.any([inFlight.signal, AbortSignal.timeout(30_000)])
     const shapes = editor.getSelectedShapes()
-    const items = shapes.slice(0, CANVAS_MAX_SELECTION_ITEMS).map(shape => describeShape(editor, shape))
+    const items = shapes.slice(0, CANVAS_MAX_SELECTION_ITEMS).map(shape => describeShape(editor, shape, true))
+    const exportShapes = [...shapes]
+    for (const image of shapes) {
+      if (image.type !== 'image') continue
+      const linked = editor.getCurrentPageShapes().filter(shape => {
+        const meta = shape.meta as { targetShapeId?: unknown } | undefined
+        return meta?.targetShapeId === image.id && annotationOf(shape) !== undefined
+      }).slice(0, 16)
+      for (const annotation of linked) if (!exportShapes.some(shape => shape.id === annotation.id)) exportShapes.push(annotation)
+    }
     let selectionImage: string | undefined
     let failure: string | undefined
     try {
+      if (shapes.some(image => image.type === 'image' && !supportsAnnotationCoordinates(image)
+        && editor.getCurrentPageShapes().some(annotation => {
+          const meta = annotation.meta as { targetShapeId?: unknown } | undefined
+          return meta?.targetShapeId === image.id && annotationOf(annotation) !== undefined
+        }))) throw new Error('annotation-image-variant-unsupported')
       imageLimit ??= await readCanvasImageLimit(signal)
       try {
-        selectionImage = await exportSelectionPreview(editor, shapes, imageLimit, signal)
+        selectionImage = await exportSelectionPreview(editor, exportShapes, imageLimit, signal)
       } catch (error) {
         signal.throwIfAborted()
         failure = error instanceof Error ? error.message : 'preview-export-failed'

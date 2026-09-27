@@ -159,4 +159,89 @@ export const TL_THEME_CSS = `
 .dsh-ig-tl-canvas .tl-container.tl-theme__light .tlui-button[data-isactive='true']::after {
 	background: rgba(${BRAND_BLUE_RGB}, 0.14);
 }
+
+.dsh-ig-annotation-panel {
+	position: absolute;
+	top: 12px;
+	right: 16px;
+	z-index: 500;
+	display: grid;
+	gap: 8px;
+	width: min(320px, calc(100% - 32px));
+	padding: 12px;
+	border: 1px solid ${CARD_BORDER};
+	border-radius: 12px;
+	background: #fff;
+	color: ${BRAND_INK};
+	box-shadow: ${CARD_SHADOW};
+	font-family: inherit;
+	font-size: 12px;
+	line-height: 1.45;
+}
+.dsh-ig-annotation-panel button {
+	min-height: 30px;
+	padding: 5px 9px;
+	border: 1px solid ${CARD_BORDER};
+	border-radius: 7px;
+	background: #fff;
+	color: inherit;
+	cursor: pointer;
+}
+.dsh-ig-annotation-panel button:focus-visible,
+.dsh-ig-annotation-panel input:focus-visible {
+	outline: 2px solid ${BRAND_BLUE};
+	outline-offset: 2px;
+}
+.dsh-ig-annotation-panel button[aria-pressed='true'],
+.dsh-ig-annotation-trigger {
+	border-color: ${BRAND_BLUE};
+	background: rgba(${BRAND_BLUE_RGB}, 0.08);
+	color: ${BRAND_BLUE};
+}
+.dsh-ig-annotation-head,
+.dsh-ig-annotation-modes {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+.dsh-ig-annotation-head { justify-content: space-between; }
+.dsh-ig-annotation-head button { min-width: 30px; padding: 0; font-size: 18px; }
+.dsh-ig-annotation-modes { margin: 0; padding: 0; border: 0; }
+.dsh-ig-annotation-modes legend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.dsh-ig-annotation-label { display: grid; gap: 4px; }
+.dsh-ig-annotation-label input {
+	width: 100%;
+	min-height: 36px;
+	box-sizing: border-box;
+	padding: 7px 9px;
+	border: 1px solid ${CARD_BORDER};
+	border-radius: 7px;
+	color: ${BRAND_INK};
+	font: inherit;
+}
+.dsh-ig-annotation-panel small { color: #6b7690; }
+.dsh-ig-annotation-panel [role='alert'] { color: #b42318; }
+.dsh-ig-annotation-list {
+	display: grid;
+	gap: 5px;
+	max-height: 128px;
+	margin: 0;
+	padding: 0;
+	overflow: auto;
+	list-style: none;
+}
+.dsh-ig-annotation-list li {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	min-width: 0;
+}
+.dsh-ig-annotation-list li span {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.dsh-ig-annotation-list button { flex: 0 0 auto; min-height: 26px; padding: 3px 7px; }
 `

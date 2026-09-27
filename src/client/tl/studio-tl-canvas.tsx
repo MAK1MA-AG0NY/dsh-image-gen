@@ -1,21 +1,16 @@
 import { memo, useCallback, useId, useRef, useState, type FC } from 'react'
-import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import {
   DefaultToolbar,
   Tldraw,
-  createShapeId,
   type Editor,
-  type TLAssetId,
-  type TLCreateShapePartial,
-  type TLImageAsset,
   type TLImageShape,
 } from 'tldraw'
-import { blobToDataUrl } from '../browser-image-utils.js'
-import { clearAttachmentCache, fetchAttachmentBlob } from '../image-cache.js'
-import { CANVAS_MAX_PROMPT_CHARS } from '../../shared.js'
+import { clearAttachmentCache } from '../image-cache.js'
 import { applyBrandTheme } from './tl-brand-theme.js'
 import { startCanvasSync, type CanvasSyncStatus } from './canvas-sync.js'
-import { clearTlLandings, getTlLandingGeneration, registerTlLandingConsumer, type TlLandingItem } from './tl-canvas-bridge.js'
+import { clearTlLandings, getTlLandingGeneration, registerTlLandingConsumer } from './tl-canvas-bridge.js'
+import { landTlItems } from './canvas-landing.js'
+import { useCanvasAnnotationPanel, syncLinkedAnnotationPositions } from './canvas-annotation-panel.js'
 
 /**
  * Infinite canvas surface for the Studio workbench, backed by tldraw.
@@ -23,10 +18,6 @@ import { clearTlLandings, getTlLandingGeneration, registerTlLandingConsumer, typ
  * Both surfaces share one locally persisted document. The landing queue is
  * consumed once; tldraw owns subsequent edits, deletion, undo and persistence.
  */
-
-const MAX_DISPLAY_SIDE = 380
-const GRID_GAP = 40
-const GRID_COLS = 3
 
 const mountedCanvases = new Set<() => void>()
 const mountedEditors = new Set<Editor>()
@@ -62,187 +53,33 @@ export function deselectStudioTlCanvases(): boolean {
  */
 const StudioToolbar = () => <DefaultToolbar orientation="vertical" />
 
-function tlAssetIdFor(galleryId: string): TLAssetId {
-  return `asset:ig-${galleryId.replace(/[^A-Za-z0-9_-]/g, '_')}` as TLAssetId
-}
-
-function displaySizeOf(attachment: ImageAttachmentRef): { w: number; h: number } {
-  const width = attachment.width > 0 ? attachment.width : 512
-  const height = attachment.height > 0 ? attachment.height : 512
-  const scale = MAX_DISPLAY_SIDE / Math.max(width, height)
-  return { w: Math.round(width * scale), h: Math.round(height * scale) }
-}
-
-/** Dedupe across the whole document, including images moved to other pages. */
-function landedIdsOf(editor: Editor): Set<string> {
-  const landedIds = new Set<string>()
-  for (const shape of editor.store.allRecords()) {
-    if (shape.typeName !== 'shape' || shape.type !== 'image') continue
-    const galleryId = (shape.meta as { galleryId?: unknown } | undefined)?.galleryId
-    if (typeof galleryId === 'string') landedIds.add(galleryId)
-  }
-  return landedIds
-}
-
-/** Truncate the prompt copied onto a shape: the canvas digest stays compact. */
-function metaPromptOf(prompt: string | undefined): string | undefined {
-  if (typeof prompt !== 'string') return undefined
-  const collapsed = prompt.replace(/\s+/g, ' ').trim()
-  return collapsed.length === 0 ? undefined : collapsed.slice(0, CANVAS_MAX_PROMPT_CHARS)
-}
-
-async function landTlItems(editor: Editor, items: readonly TlLandingItem[], isActive: () => boolean): Promise<boolean> {
-  // Explicit saves may request an image that is already in the document.
-  const landedIds = landedIdsOf(editor)
-  const pending = items.filter(item => !landedIds.has(item.galleryId))
-  if (pending.length === 0) return true
-
-  const assets: TLImageAsset[] = []
-  const landed: Array<{ galleryId: string; assetId: TLAssetId; w: number; h: number; attachmentId: string; name: string; fromConversation: boolean; prompt?: string; provider?: string; model?: string }> = []
-  for (const item of pending) {
-    if (!isActive()) return false
-    const assetId = tlAssetIdFor(item.galleryId)
-    if (editor.getAsset(assetId) === undefined) {
-      try {
-        const blob = await fetchAttachmentBlob(item.attachment)
-        const src = await blobToDataUrl(blob)
-        assets.push({
-          id: assetId,
-          typeName: 'asset',
-          type: 'image',
-          meta: {},
-          props: {
-            name: item.attachment.name ?? item.galleryId,
-            src,
-            w: item.attachment.width > 0 ? item.attachment.width : 512,
-            h: item.attachment.height > 0 ? item.attachment.height : 512,
-            mimeType: blob.type || item.attachment.mediaType,
-            isAnimated: item.attachment.mediaType === 'image/gif',
-            fileSize: item.attachment.bytes,
-          },
-        })
-      } catch (error) {
-        console.warn('[dsh-image-gen] canvas landing skipped (attachment unreadable):', item.galleryId, error)
-        continue
-      }
-    }
-    const size = displaySizeOf(item.attachment)
-    const prompt = metaPromptOf(item.prompt)
-    landed.push({
-      galleryId: item.galleryId,
-      assetId,
-      attachmentId: String(item.attachment.attachmentId),
-      name: item.attachment.name ?? item.galleryId,
-      fromConversation: item.fromConversation === true,
-      w: size.w,
-      h: size.h,
-      ...(prompt !== undefined ? { prompt } : {}),
-      ...(typeof item.provider === 'string' && item.provider.length > 0 ? { provider: item.provider } : {}),
-      ...(typeof item.model === 'string' && item.model.length > 0 ? { model: item.model } : {}),
-    })
-  }
-  if (!isActive()) return false
-  // A second surface/tab may have synchronized this image during the fetch.
-  const nowLanded = landedIdsOf(editor)
-  const ready = landed.filter(item => !nowLanded.has(item.galleryId))
-  if (ready.length === 0) return true
-  if (assets.length > 0) editor.createAssets(assets)
-
-  // Layout: rows of up to GRID_COLS images. The block prefers the viewport
-  // center; when that spot is already occupied it drops below all existing
-  // content, so consecutive batches never stack on top of each other.
-  const rows: Array<typeof ready> = []
-  for (let index = 0; index < ready.length; index += GRID_COLS) rows.push(ready.slice(index, index + GRID_COLS))
-  const rowSizes = rows.map(row => ({
-    width: row.reduce((sum, cell) => sum + cell.w, 0) + GRID_GAP * (row.length - 1),
-    height: Math.max(...row.map(cell => cell.h)),
-  }))
-  const blockWidth = Math.max(...rowSizes.map(size => size.width))
-  const blockHeight = rowSizes.reduce((sum, size) => sum + size.height, 0) + GRID_GAP * (rows.length - 1)
-  const viewport = editor.getViewportPageBounds()
-  const originX = viewport.center.x - blockWidth / 2
-  let originY = viewport.center.y - blockHeight / 2
-
-  const existing = editor.getCurrentPageShapes()
-  if (existing.length > 0) {
-    // Cushion the candidate by half a gap so landed batches keep breathing room.
-    const cushion = GRID_GAP / 2
-    const candidateX = originX - cushion
-    const candidateY = originY - cushion
-    const candidateW = blockWidth + cushion * 2
-    const candidateH = blockHeight + cushion * 2
-    let occupied = false
-    let contentBottom = Number.NEGATIVE_INFINITY
-    for (const shape of existing) {
-      const bounds = editor.getShapePageBounds(shape.id)
-      if (bounds === undefined) continue
-      if (bounds.maxY > contentBottom) contentBottom = bounds.maxY
-      if (!occupied
-        && candidateX < bounds.maxX && candidateX + candidateW > bounds.minX
-        && candidateY < bounds.maxY && candidateY + candidateH > bounds.minY) {
-        occupied = true
-      }
-    }
-    if (occupied) originY = contentBottom + GRID_GAP
-  }
-  let cursorY = originY
-  const shapes: TLCreateShapePartial<TLImageShape>[] = []
-  for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
-    const row = rows[rowIndex]!
-    const rowSize = rowSizes[rowIndex]!
-    let cursorX = originX + (blockWidth - rowSize.width) / 2
-    for (const cell of row) {
-      shapes.push({
-        id: createShapeId(`ig-${cell.galleryId}`),
-        type: 'image',
-        x: Math.round(cursorX),
-        y: Math.round(cursorY),
-        props: { assetId: cell.assetId, w: cell.w, h: cell.h },
-        // Generation provenance rides on meta: canvas-sync surfaces it in the
-        // model-facing digest so "regenerate this" reuses the original params.
-        meta: {
-          galleryId: cell.galleryId,
-          attachmentId: cell.attachmentId,
-          name: cell.name,
-          fromConversation: cell.fromConversation,
-          ...(cell.prompt !== undefined ? { prompt: cell.prompt } : {}),
-          ...(cell.provider !== undefined ? { provider: cell.provider } : {}),
-          ...(cell.model !== undefined ? { model: cell.model } : {}),
-        },
-      })
-      cursorX += cell.w + GRID_GAP
-    }
-    cursorY += rowSize.height + GRID_GAP
-  }
-  editor.createShapes(shapes)
-
-  // When the batch landed outside the visible viewport (e.g. below older
-  // content), bring it into view: pan if it fits at the current zoom,
-  // otherwise zoom out just enough to frame it.
-  const visible = originX >= viewport.minX && originY >= viewport.minY
-    && originX + blockWidth <= viewport.maxX && originY + blockHeight <= viewport.maxY
-  if (!visible) {
-    if (blockWidth <= viewport.w && blockHeight <= viewport.h) {
-      editor.centerOnPoint({ x: originX + blockWidth / 2, y: originY + blockHeight / 2 }, { animation: { duration: 240 } })
-    } else {
-      editor.zoomToBounds({ x: originX, y: originY, w: blockWidth, h: blockHeight }, { animation: { duration: 240 }, inset: GRID_GAP })
-    }
-  }
-  return true
-}
-
 const TL_COMPONENTS = { Toolbar: StudioToolbar }
 
 export const StudioTlCanvas: FC<{ lang?: 'zh' | 'en' }> = memo(function StudioTlCanvas({ lang = 'zh' }) {
   // Separate camera/selection state for editors sharing the document.
   const sessionId = useId()
   const [syncStatus, setSyncStatus] = useState<CanvasSyncStatus>({ phase: 'idle', count: 0 })
+  const [editor, setEditor] = useState<Editor>()
+  const [selectedImage, setSelectedImage] = useState<TLImageShape>()
+  const annotation = useCanvasAnnotationPanel({ editor, image: selectedImage, lang })
   const retrySync = useRef<() => void>(() => {})
   const onMount = useCallback((editor: Editor) => {
           let active = true
           // tldraw restores instance state (including the selection) from the
           // persisted snapshot; every mount starts as fresh interaction state.
           editor.run(() => editor.selectNone())
+          setEditor(editor)
+          const syncSelectedImage = (): void => {
+            const selected = editor.getSelectedShapes()
+            const image = selected.length === 1 && selected[0]?.type === 'image' ? selected[0] : undefined
+            setSelectedImage(image)
+          }
+          const stopSelectionWatch = editor.store.listen(event => {
+            syncSelectedImage()
+            const changedImages = [...Object.values(event.changes.added), ...Object.values(event.changes.updated).map(pair => pair[1])]
+              .filter(record => record.typeName === 'shape' && record.type === 'image')
+            if (changedImages.length > 0) syncLinkedAnnotationPositions(editor, new Set(changedImages.map(shape => String(shape.id))))
+          }, { source: 'all', scope: 'all' })
           mountedEditors.add(editor)
           // Re-tint canvas-rendered colors (selection, marquee, "blue"
           // palette) to the plugin brand; UI chrome comes from TL_THEME_CSS.
@@ -283,6 +120,9 @@ export const StudioTlCanvas: FC<{ lang?: 'zh' | 'en' }> = memo(function StudioTl
           mountedCanvases.add(clear)
           return () => {
             active = false
+            stopSelectionWatch()
+            setEditor(undefined)
+            setSelectedImage(undefined)
             mountedEditors.delete(editor)
             mountedCanvases.delete(clear)
             stopLanding()
@@ -299,13 +139,14 @@ export const StudioTlCanvas: FC<{ lang?: 'zh' | 'en' }> = memo(function StudioTl
         : '选区同步失败'
 
   return (
-    <div className="dsh-ig-tl-canvas">
+    <div className="dsh-ig-tl-canvas" onPointerDownCapture={annotation.onPointerDownCapture} onPointerUpCapture={annotation.onPointerUpCapture}>
       <Tldraw
         persistenceKey="dsh-image-gen-workbench-v1"
         sessionId={sessionId}
         components={TL_COMPONENTS}
         onMount={onMount}
       />
+      {annotation.panel}
       {syncStatus.phase !== 'idle' && (
         <div className="dsh-ig-canvas-sync-status" data-phase={syncStatus.phase} role="status" aria-live="polite">
           <span>{statusText}{syncStatus.phase === 'error' ? `：${canvasSyncError(syncStatus.error, lang)}` : ''}</span>
@@ -316,8 +157,9 @@ export const StudioTlCanvas: FC<{ lang?: 'zh' | 'en' }> = memo(function StudioTl
   )
 })
 
-function canvasSyncError(error: string | undefined, lang: 'zh' | 'en'): string {
+export function canvasSyncError(error: string | undefined, lang: 'zh' | 'en'): string {
   const en = lang === 'en'
+  if (error?.includes('annotation-image-variant-unsupported')) return en ? 'Remove annotations before cropping or flipping this image.' : '裁剪或翻转图片前，请先移除其标注。'
   if (error?.includes('too-many-selected')) return en ? 'Select at most 16 shapes to edit with originals.' : '使用原图编辑时，请一次选择不超过 16 个元素。'
   if (error?.includes('too-large')) return en ? 'An image exceeds the size limit. Reduce its size and retry.' : '图片超出大小限制，请缩小后重试。'
   if (error?.includes('unsupported')) return en ? 'Use PNG, JPEG, WebP or GIF images.' : '请使用 PNG、JPEG、WebP 或 GIF 图片。'

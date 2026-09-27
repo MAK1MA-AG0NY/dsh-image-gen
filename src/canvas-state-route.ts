@@ -11,7 +11,7 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { ImageMediaType } from '@deepseek-ai/dsh-attachment'
-import { CANVAS_MAX_NODES, CANVAS_MAX_PROMPT_CHARS, CANVAS_MAX_SELECTION_ITEMS, CANVAS_MAX_SELECTION_KINDS, CANVAS_NODE_KINDS, type CanvasNodeKind, type CanvasNodeSummary, type CanvasStatePush } from './shared.js'
+import { CANVAS_MAX_NODES, CANVAS_MAX_PROMPT_CHARS, CANVAS_MAX_SELECTION_ITEMS, CANVAS_MAX_SELECTION_KINDS, CANVAS_NODE_KINDS, type CanvasEditAnnotation, type CanvasNodeKind, type CanvasNodeSummary, type CanvasStatePush } from './shared.js'
 import type { CanvasMirror } from './canvas-state.js'
 import { parseImageAttachmentRef } from './reference-image.js'
 
@@ -33,6 +33,8 @@ const MAX_PROVIDER_CHARS = 32
 const MAX_MODEL_CHARS = 128
 const MAX_NODE_COUNT = 100_000
 const MAX_SELECTION_COUNT = 1_000
+const MAX_ANNOTATIONS_PER_IMAGE = 16
+const MAX_ANNOTATION_INSTRUCTION_CHARS = 200
 
 /** Serve one canvas-state push. */
 export async function serveCanvasState(req: IncomingMessage, res: ServerResponse, deps: CanvasStateRouteDeps): Promise<void> {
@@ -178,6 +180,12 @@ function parseNodeSummary(value: unknown): CanvasNodeSummary | undefined {
   const record = plainRecord(value)
   if (record === undefined) return undefined
   if (typeof record.kind !== 'string' || !(CANVAS_NODE_KINDS as readonly string[]).includes(record.kind)) return undefined
+  const shapeId = optionalBoundedString(record.shapeId, MAX_ID_CHARS)
+  let annotations: CanvasEditAnnotation[] | undefined
+  if (record.annotations !== undefined) {
+    if (record.kind !== 'image' || !Array.isArray(record.annotations) || record.annotations.length > MAX_ANNOTATIONS_PER_IMAGE) throw new InvalidPush()
+    annotations = record.annotations.map(parseAnnotation)
+  }
   const galleryId = optionalBoundedString(record.galleryId, MAX_ID_CHARS)
   const attachmentId = optionalBoundedString(record.attachmentId, MAX_ID_CHARS)
   const attachment = record.attachment === undefined ? undefined : parseImageAttachmentRef(record.attachment)
@@ -191,6 +199,8 @@ function parseNodeSummary(value: unknown): CanvasNodeSummary | undefined {
   const height = optionalDimension(record.height)
   return {
     kind: record.kind as CanvasNodeKind,
+    ...(shapeId === undefined ? {} : { shapeId }),
+    ...(annotations === undefined ? {} : { annotations }),
     ...(galleryId === undefined ? {} : { galleryId }),
     ...(attachmentId === undefined ? {} : { attachmentId }),
     ...(attachment === undefined ? {} : { attachment }),
@@ -203,6 +213,22 @@ function parseNodeSummary(value: unknown): CanvasNodeSummary | undefined {
     ...(model === undefined ? {} : { model }),
   }
 }
+
+function parseAnnotation(value: unknown): CanvasEditAnnotation {
+  const record = plainRecord(value)
+  if (record === undefined || Object.keys(record).some(key => !['id', 'kind', 'x', 'y', 'width', 'height', 'instruction'].includes(key))) throw new InvalidPush()
+  const id = boundedString(record.id, 1, MAX_ID_CHARS)
+  const instruction = boundedString(record.instruction, 1, MAX_ANNOTATION_INSTRUCTION_CHARS)
+  const kind = record.kind
+  const x = normalizedCoordinate(record.x)
+  const y = normalizedCoordinate(record.y)
+  const width = record.width === undefined ? undefined : normalizedCoordinate(record.width)
+  const height = record.height === undefined ? undefined : normalizedCoordinate(record.height)
+  if (id === undefined || instruction === undefined || (kind !== 'point' && kind !== 'arrow' && kind !== 'region') || x === undefined || y === undefined || (record.width !== undefined && width === undefined) || (record.height !== undefined && height === undefined) || (kind === 'region' && (width === undefined || height === undefined || width <= 0 || height <= 0)) || (kind !== 'region' && (width !== undefined || height !== undefined)) || (width !== undefined && x + width > 1) || (height !== undefined && y + height > 1)) throw new InvalidPush()
+  return { id, kind, x, y, ...(width === undefined ? {} : { width }), ...(height === undefined ? {} : { height }), instruction }
+}
+
+const normalizedCoordinate = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1 ? value : undefined
 
 function plainRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined

@@ -5,8 +5,10 @@ import { CANVAS_ASSET_ROUTE } from '../../shared.js'
 /** Bound raster dimensions before exporting; large multi-image PNGs get a
  * JPEG preview instead of being silently discarded. Originals are separate. */
 export async function exportSelectionPreview(editor: Editor, shapes: TLShape[], maxBytes: number, signal: AbortSignal): Promise<string> {
-  const bounds = editor.getSelectionPageBounds()
-  const scale = Math.min(1, 2048 / Math.max(1, (bounds?.w ?? 2048) + 32, (bounds?.h ?? 2048) + 32))
+  const bounds = shapes.map(shape => editor.getShapePageBounds(shape.id)).filter(bound => bound !== undefined)
+  const width = bounds.length === 0 ? 2048 : Math.max(...bounds.map(bound => bound.maxX)) - Math.min(...bounds.map(bound => bound.minX))
+  const height = bounds.length === 0 ? 2048 : Math.max(...bounds.map(bound => bound.maxY)) - Math.min(...bounds.map(bound => bound.minY))
+  const scale = Math.min(1, 2048 / Math.max(1, width + 32, height + 32))
   const attempts = [
     { format: 'png' as const, scale, quality: 1 },
     { format: 'jpeg' as const, scale, quality: 0.85 },

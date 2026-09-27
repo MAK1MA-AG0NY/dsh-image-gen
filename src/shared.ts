@@ -52,8 +52,26 @@ export const CANVAS_MAX_SELECTION_KINDS = 8
 export const CANVAS_MAX_PROMPT_CHARS = 120
 
 /** One shape on the workbench infinite canvas, summarized for the model. */
+export interface CanvasEditAnnotation {
+  readonly id: string
+  readonly kind: 'point' | 'arrow' | 'region'
+  /** Image-local normalized coordinate in the range 0..1. */
+  readonly x: number
+  /** Image-local normalized coordinate in the range 0..1. */
+  readonly y: number
+  /** Image-local normalized extent; present only for regions. */
+  readonly width?: number
+  readonly height?: number
+  readonly instruction: string
+}
+
+/** One shape on the workbench infinite canvas, summarized for the model. */
 export interface CanvasNodeSummary {
   kind: CanvasNodeKind
+  /** Stable tldraw shape id, supplied for selected images with annotations. */
+  shapeId?: string
+  /** Image-anchored edit notes; present only on selected image summaries. */
+  annotations?: readonly CanvasEditAnnotation[]
   /** Gallery id when the shape is a generated image landed from the bus. */
   galleryId?: string
   /** Conversation attachment id for generated images; edit_image can target it directly. */

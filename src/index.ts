@@ -10,7 +10,7 @@ import { CanvasMirror } from './canvas-state.js'
 import { serveCanvasState } from './canvas-state-route.js'
 import { serveCanvasAsset } from './canvas-asset-route.js'
 import { CANVAS_ASSET_ROUTE } from './shared.js'
-import { registerCanvasTools, resolveCanvasSelectionReferences } from './canvas-tools.js'
+import { assertCanvasSelectionCurrent, canvasSelectionEditPrompt, registerCanvasTools, resolveCanvasSelection } from './canvas-tools.js'
 import { editComfyUIImage, generateComfyUIImage } from './comfyui.js'
 import { editDashScopeImage, generateDashScopeImage } from './dashscope.js'
 import { editGoogleImage, generateGoogleImage } from './google.js'
@@ -284,15 +284,16 @@ export function apply(ctx: Context, config: Config = {}): void {
       )) {
         throw new Error('edit_image source=canvas_selection cannot be combined with source_attachment_id, source_attachment_ids, source_path, or source_paths; provide exactly one selector')
       }
-      const sourceImages: ResolvedReferenceImage[] = canvasSelection
-        ? await resolveCanvasSelectionReferences({
+      const canvasSelectionResult = canvasSelection
+        ? await resolveCanvasSelection({
           mirror: canvasMirror,
           attachments: ctx.attachments,
           ...(exec.agent === undefined ? {} : { agent: exec.agent }),
           maxBytes: ctx.attachments.imageLimits.maxImageBytes,
           signal: exec.signal,
         })
-        : await resolveReferenceImages({
+        : undefined
+      const sourceImages: ResolvedReferenceImage[] = canvasSelectionResult?.references ?? await resolveReferenceImages({
           ...(exec.agent === undefined ? {} : { agent: exec.agent }),
           attachments: ctx.attachments,
           ...(typeof args.source_attachment_id === 'string' ? { sourceAttachmentId: args.source_attachment_id } : {}),
@@ -303,6 +304,10 @@ export function apply(ctx: Context, config: Config = {}): void {
           signal: exec.signal,
         })
 
+      const editPrompt = canvasSelectionResult === undefined
+        ? args.prompt
+        : canvasSelectionEditPrompt(args.prompt, canvasSelectionResult.entry)
+
       if (active.provider === 'comfyui') {
         if (sourceImages.length > 1) {
           throw new Error(`ComfyUI edit_image supports exactly one source image per call; this call resolved ${String(sourceImages.length)} images. Call edit_image again with source_attachment_id set to the single attachment ID of the image to edit.`)
@@ -310,10 +315,11 @@ export function apply(ctx: Context, config: Config = {}): void {
         const sourceImage = sourceImages[0]
         if (sourceImage === undefined) throw new Error('edit_image requires a reference image')
         const workflow = selectComfyUIWorkflow(active, args.workflow)
+        if (canvasSelectionResult !== undefined) assertCanvasSelectionCurrent(canvasMirror, canvasSelectionResult.entry)
         const generated = await editComfyUIImage({
           baseURL: active.baseURL,
           workflowJson: workflow.json,
-          prompt: mergeComfyUIPrompt(workflow.presetPrompt, args.prompt),
+          prompt: mergeComfyUIPrompt(workflow.presetPrompt, editPrompt),
           sourceImage: { data: sourceImage.data, mediaType: sourceImage.mediaType },
           timeoutMs: active.timeoutMs,
           maxBytes: ctx.attachments.imageLimits.maxImageBytes,
@@ -324,10 +330,11 @@ export function apply(ctx: Context, config: Config = {}): void {
 
       if (active.provider === 'chatgpt-sub' || active.provider === 'grok-sub' || active.provider === 'google-sub') {
         if (sourceImages.length === 0) throw new Error('edit_image requires a reference image')
+        if (canvasSelectionResult !== undefined) assertCanvasSelectionCurrent(canvasMirror, canvasSelectionResult.entry)
         const generated = await generateSubscriptionImage({
           manager: subscriptionManager,
           provider: active.provider,
-          prompt: args.prompt,
+          prompt: editPrompt,
           sourceImages,
           ...(args.size !== undefined ? { size: args.size } : {}),
           maxBytes: ctx.attachments.imageLimits.maxImageBytes,
@@ -337,23 +344,24 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
 
       const credential = await requireApiKey(ctx, active.provider, 'edit_image')
+      if (canvasSelectionResult !== undefined) assertCanvasSelectionCurrent(canvasMirror, canvasSelectionResult.entry)
       if (active.provider === 'google') {
         const aspectRatio = (args.aspect_ratio ?? active.aspectRatio) as AspectRatio
         const imageSize = (args.image_size ?? active.imageSize) as ImageSize
-        const generated = await editGoogleImage({ apiKey: credential, endpoint: active.endpoint, model: active.model, prompt: args.prompt, sourceImages, aspectRatio, imageSize, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal })
+        const generated = await editGoogleImage({ apiKey: credential, endpoint: active.endpoint, model: active.model, prompt: editPrompt, sourceImages, aspectRatio, imageSize, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal })
         return saveGenerated(ctx, generated, active.provider, active.model, `${aspectRatio}, ${imageSize}`, current(), exec, knownWorkspaceRoots)
       }
 
       const size = args.size ?? active.imageSize
       if (active.provider === 'openai' || active.provider === 'openai-compat' || active.provider === 'xai' || active.provider === 'zhipu') {
-        const generated = await editOpenAICompatibleImage({ apiKey: credential, baseURL: active.baseURL, model: active.model, prompt: args.prompt, sourceImages, size, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal, ...(active.provider === 'openai-compat' ? { editFormat: active.editFormat, editExtra: active.editExtra } : {}) })
+        const generated = await editOpenAICompatibleImage({ apiKey: credential, baseURL: active.baseURL, model: active.model, prompt: editPrompt, sourceImages, size, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal, ...(active.provider === 'openai-compat' ? { editFormat: active.editFormat, editExtra: active.editExtra } : {}) })
         return saveGenerated(ctx, generated, active.provider, active.model, size, current(), exec, knownWorkspaceRoots)
       }
       if (active.provider === 'seedream') {
-        const generated = await editSeedreamImage({ apiKey: credential, baseURL: active.baseURL, model: active.model, prompt: args.prompt, sourceImages, size, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal, arkOptions: active.arkOptions })
+        const generated = await editSeedreamImage({ apiKey: credential, baseURL: active.baseURL, model: active.model, prompt: editPrompt, sourceImages, size, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal, arkOptions: active.arkOptions })
         return saveGenerated(ctx, generated, active.provider, active.model, size, current(), exec, knownWorkspaceRoots)
       }
-      const generated = await editDashScopeImage({ apiKey: credential, endpoint: active.endpoint, model: active.model, prompt: args.prompt, sourceImages, size, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal })
+        const generated = await editDashScopeImage({ apiKey: credential, endpoint: active.endpoint, model: active.model, prompt: editPrompt, sourceImages, size, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal })
       return saveGenerated(ctx, generated, active.provider, active.model, size, current(), exec, knownWorkspaceRoots)
     },
     presentResult: (_args, result) => imagePresentation(result),
