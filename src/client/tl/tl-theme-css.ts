@@ -162,12 +162,17 @@ export const TL_THEME_CSS = `
 
 .dsh-ig-annotation-panel {
 	position: absolute;
-	top: 12px;
+	top: auto;
+	left: auto;
+	bottom: 88px;
 	right: 16px;
 	z-index: 500;
 	display: grid;
 	gap: 8px;
 	width: min(320px, calc(100% - 32px));
+	box-sizing: border-box;
+	max-height: min(60vh, calc(100% - 136px));
+	overflow-y: auto;
 	padding: 12px;
 	border: 1px solid ${CARD_BORDER};
 	border-radius: 12px;
